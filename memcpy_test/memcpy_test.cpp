@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <wrl/client.h>
 #include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
 
 #include <assert.h>
 #include <immintrin.h>
@@ -19,6 +21,8 @@ using Microsoft::WRL::ComPtr;
 
 
 #pragma comment(lib,  "d3d11.lib")
+#pragma comment(lib,  "d3d12.lib")
+#pragma comment(lib,  "dxgi.lib")
 
 BOOL WINAPI CtrlHandler(DWORD fdwCtrlType);
 
@@ -41,6 +45,7 @@ struct app_context
         int64_t counter = 0;
         int32_t batch_size = 1;
         int32_t fps = -1;
+        int32_t mode = 11; // 11=D3D11, 12=D3D12
     }gpu;
 
     std::vector<std::thread> thread_objs;
@@ -191,17 +196,167 @@ void mem_map_thread(app_context* ctx)
     }
 }
 
+void d3d12_upload_thread(app_context* ctx)
+{
+    ComPtr<IDXGIFactory4> factory;
+    HRESULT hret = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateDXGIFactory1 failed: 0x" << std::hex << hret << std::dec << std::endl;
+        return;
+    }
+
+    ComPtr<IDXGIAdapter1> adapter;
+    hret = factory->EnumAdapters1(0, &adapter);
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] EnumAdapters1 failed" << std::endl;
+        return;
+    }
+
+    ComPtr<ID3D12Device> device;
+    hret = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] D3D12CreateDevice failed: 0x" << std::hex << hret << std::dec << std::endl;
+        return;
+    }
+
+    // Create copy command queue
+    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+
+    ComPtr<ID3D12CommandQueue> copyQueue;
+    hret = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&copyQueue));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateCommandQueue failed" << std::endl;
+        return;
+    }
+
+    ComPtr<ID3D12CommandAllocator> cmdAlloc;
+    hret = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&cmdAlloc));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateCommandAllocator failed" << std::endl;
+        return;
+    }
+
+    ComPtr<ID3D12GraphicsCommandList> cmdList;
+    hret = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, cmdAlloc.Get(), nullptr, IID_PPV_ARGS(&cmdList));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateCommandList failed" << std::endl;
+        return;
+    }
+    cmdList->Close();
+
+    // Create fence for synchronization
+    ComPtr<ID3D12Fence> fence;
+    hret = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateFence failed" << std::endl;
+        return;
+    }
+    HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    UINT64 fenceValue = 0;
+
+    int64_t bufferSize = (int64_t)ctx->gpu.batch_size * 1024 * 1024;
+
+    // Upload heap (CPU-visible, for writing source data)
+    D3D12_HEAP_PROPERTIES uploadHeapProps = {};
+    uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC bufferDesc = {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width = bufferSize;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    bufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ComPtr<ID3D12Resource> uploadBuffer;
+    hret = device->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE,
+        &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateCommittedResource (upload) failed" << std::endl;
+        CloseHandle(fenceEvent);
+        return;
+    }
+
+    // Default heap (GPU-only, destination)
+    D3D12_HEAP_PROPERTIES defaultHeapProps = {};
+    defaultHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    ComPtr<ID3D12Resource> defaultBuffer;
+    hret = device->CreateCommittedResource(&defaultHeapProps, D3D12_HEAP_FLAG_NONE,
+        &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&defaultBuffer));
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] CreateCommittedResource (default) failed" << std::endl;
+        CloseHandle(fenceEvent);
+        return;
+    }
+
+    // Map upload buffer once (persistent map)
+    void* mappedData = nullptr;
+    D3D12_RANGE readRange = { 0, 0 };
+    hret = uploadBuffer->Map(0, &readRange, &mappedData);
+    if (FAILED(hret)) {
+        std::cout << "[d3d12] Map failed" << std::endl;
+        CloseHandle(fenceEvent);
+        return;
+    }
+
+    // Source data
+    int8_t* sys_src = (int8_t*)_aligned_malloc(bufferSize, 32);
+
+    int32_t interval = ctx->gpu.fps > 0 ? ctx->gpu.fps : -1;
+    std::cout << "[d3d12] upload " << ctx->gpu.batch_size << " MB, interval " << interval << " ms" << std::endl;
+
+    while (ctx->machine.running) {
+        // CPU write to upload heap
+        stream_copy(mappedData, sys_src, bufferSize);
+
+        // Record copy command
+        cmdAlloc->Reset();
+        cmdList->Reset(cmdAlloc.Get(), nullptr);
+        cmdList->CopyBufferRegion(defaultBuffer.Get(), 0, uploadBuffer.Get(), 0, bufferSize);
+        cmdList->Close();
+
+        // Execute
+        ID3D12CommandList* lists[] = { cmdList.Get() };
+        copyQueue->ExecuteCommandLists(1, lists);
+
+        // Signal and wait
+        fenceValue++;
+        copyQueue->Signal(fence.Get(), fenceValue);
+        if (fence->GetCompletedValue() < fenceValue) {
+            fence->SetEventOnCompletion(fenceValue, fenceEvent);
+            WaitForSingleObject(fenceEvent, INFINITE);
+        }
+
+        InterlockedAdd64(&ctx->gpu.counter, ctx->gpu.batch_size);
+
+        if (interval > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+        }
+    }
+
+    uploadBuffer->Unmap(0, nullptr);
+    if (sys_src) _aligned_free(sys_src);
+    CloseHandle(fenceEvent);
+}
+
 int main(int argc,  char *argv[])
 {
     bool bret = SetConsoleCtrlHandler(CtrlHandler, TRUE);
     assert(bret);
-    std::cout << "usage: "<< argv[0] << " cpu_threads cpu_MB gpu_threads gpu_MB fps\n"
+    std::cout << "usage: "<< argv[0] << " cpu_threads cpu_MB gpu_threads gpu_MB fps gpu_mode\n"
         << "  cpu_threads: number of CPU memcpy threads\n"
         << "  cpu_MB:      block size in MB for each CPU memcpy\n"
-        << "  gpu_threads: number of GPU upload threads (D3D11 Map/Unmap)\n"
+        << "  gpu_threads: number of GPU upload threads\n"
         << "  gpu_MB:      block size in MB for each GPU upload\n"
         << "  fps:         frame rate limit (omit for unlimited)\n"
-        << "  example: " << argv[0] << " 1 64 2 8 30\n"
+        << "  gpu_mode:    11=D3D11 Map/Unmap (default), 12=D3D12 Upload Heap + Copy Queue\n"
+        << "  example: " << argv[0] << " 1 64 1 64 0 12\n"
         << std::endl;
 
     if (argc >= 2) {
@@ -221,7 +376,13 @@ int main(int argc,  char *argv[])
     }
 
     if (argc >= 6) {
-        context.cpu.fps = context.gpu.fps = 1000 / atoi(argv[5]);
+        int fps_val = atoi(argv[5]);
+        if (fps_val > 0)
+            context.cpu.fps = context.gpu.fps = 1000 / fps_val;
+    }
+
+    if (argc >= 7) {
+        context.gpu.mode = atoi(argv[6]);
     }
 
     context.machine.running = true;
@@ -229,7 +390,8 @@ int main(int argc,  char *argv[])
     std::cout << "run benchmark for \n" 
         << " [cpu] " << context.cpu.batch_size << " MB with " << context.cpu.threads << " threads and "
         << (context.cpu.fps > 0 ? std::to_string(1000 / context.cpu.fps) : "unlimited") << " fps \n"
-        << " [gpu] " << context.gpu.batch_size << " MB with " << context.gpu.threads << " threads and "
+        << " [gpu] " << context.gpu.batch_size << " MB with " << context.gpu.threads << " threads, "
+        << (context.gpu.mode == 12 ? "D3D12 Upload Heap" : "D3D11 Map/Unmap") << " and "
         << (context.gpu.fps > 0 ? std::to_string(1000 / context.gpu.fps) : "unlimited") << " fps \n"
         << std::endl;
 
@@ -239,7 +401,8 @@ int main(int argc,  char *argv[])
     }
 
     for (auto i = 0; i < context.gpu.threads; i++) {
-        std::thread td(mem_map_thread, &context);
+        auto thread_func = (context.gpu.mode == 12) ? d3d12_upload_thread : mem_map_thread;
+        std::thread td(thread_func, &context);
         context.thread_objs.push_back(std::move(td));
     }
 

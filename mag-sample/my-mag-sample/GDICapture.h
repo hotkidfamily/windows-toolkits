@@ -12,14 +12,15 @@ class GDICapture : public CCapture {
     bool startCaptureWindow(HWND hWnd) final;
     bool startCaptureScreen(HMONITOR hMonitor) final;
     bool stop() final;
-    bool captureImage(const DesktopRect &rect) final;
-    bool setCallback(funcCaptureCallback, void *) final;
     bool setExcludeWindows(std::vector<HWND>& hWnd) final;
     const char *getName() final;
-    bool usingTimer() final;
 
-  public:
-    bool onCaptured(void *srcdata, BITMAPINFOHEADER& srcheader);
+  protected:
+    void onCaptureLoop() final;
+
+  private:
+    bool _captureImage(const DesktopRect &rect);
+    bool _onCaptured(void *srcdata, BITMAPINFOHEADER& srcheader);
 
   private:
     HWND _hwnd{ nullptr };
@@ -34,10 +35,7 @@ class GDICapture : public CCapture {
     std::unique_ptr<VideoFrame> _frames;
     DesktopRect _lastRect;
 
-    std::recursive_mutex _cbMutex;
-    funcCaptureCallback _callback = nullptr;
-    void *_callbackargs = nullptr;
-
     std::vector<HWND> _coverdWindows;
+    std::recursive_mutex _excludeMutex;
     HWND _previousHwnd = nullptr;
 };

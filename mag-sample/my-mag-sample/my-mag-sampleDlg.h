@@ -34,7 +34,6 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
     afx_msg void OnBnClickedBtnWndcap();
-    afx_msg void OnTimer(UINT_PTR nIDEvent);
     afx_msg void OnBnClickedButtonFindwind();
     afx_msg void OnBnClickedBtnScreencap();
     afx_msg void OnBnClickedBtnStop();
@@ -46,18 +45,18 @@ protected:
     afx_msg void OnCbnSelchangeComboWndlist();
     afx_msg void OnSize(UINT nType, int cx, int cy);
 
-    afx_msg LRESULT OnUserDefinedMessage(WPARAM wParam, LPARAM lParam);
-
 private:
     std::unique_ptr<AppContext> _appContext;
     CComboBox _wndListCombobox;
     CStatic _previewWnd;
     CStatic _winRectInfoText;
 
+    std::unique_ptr<CCapture> _createCaptureBackend(bool isScreenCapture, int sysIdx);
+    void _initRender();
+
 public:
 
 	void OnCaptureFrame(VideoFrame *frame);
-    void CaptureThread();
     afx_msg void OnClose();
     CComboBox _sysComboBox;
 };

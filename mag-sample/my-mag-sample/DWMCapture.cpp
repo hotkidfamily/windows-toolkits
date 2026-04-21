@@ -2,6 +2,7 @@
 #include "DWMCapture.h"
 
 #include <functional>
+#include <chrono>
 
 #include "CapUtility.h"
 #include "CPGPU.h"
@@ -18,11 +19,12 @@ DWMCapture::DWMCapture()
 
 DWMCapture::~DWMCapture()
 {
+    stop();
+
     PostMessage(_hostWnd, WM_QUIT, NULL, NULL);
     DestroyWindow(_hostWnd);
     _hostWnd = nullptr;
 
-    _action = ACTION::ACTION_Stop;
     _exit = true;
     if (_thread.joinable()) {
         _thread.join();
@@ -52,29 +54,6 @@ bool DWMCapture::stop()
 {
     _action = ACTION::ACTION_Stop;
     return true;
-}
-
-bool DWMCapture::captureImage(const DesktopRect &rect)
-{
-    _lastRect = rect;
-
-    CaptureAnImageGDI();
-
-    return true;
-}
-
-bool DWMCapture::setCallback(funcCaptureCallback fcb, void *args)
-{
-    std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-    _callback = fcb;
-    _callbackargs = args;
-
-    return false;
-}
-
-bool DWMCapture::setExcludeWindows(std::vector<HWND> &hWnd)
-{
-    return false;
 }
 
 bool DWMCapture::_onCaptured(uint8_t* data, CRect &vp)
@@ -113,13 +92,7 @@ bool DWMCapture::_onCaptured(uint8_t* data, CRect &vp)
         }
     }
 
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-
-        if (_callback) {
-            _callback(_frames.get(), _callbackargs);
-        }
-    }
+    invokeCallback(_frames.get());
 
     return bRet;
 }
@@ -129,6 +102,7 @@ bool DWMCapture::_onCaptured(uint8_t* data, CRect &vp)
 void DWMCapture::_run()
 {
     bool success = false;
+    auto frame_interval = std::chrono::milliseconds(1000 / _fps);
 
     while (!_exit) {
         switch (_action) {
@@ -142,17 +116,22 @@ void DWMCapture::_run()
             _stopSession();
             break;
         case ACTION::ACTION_Busy:
-            MSG msg;
-            while (GetMessage(&msg, nullptr, 0, 0)) {
-                if (msg.message == WM_QUIT) {
-                    break;
-                }
-                TranslateMessage(&msg); // 将消息进行处理一下
-                DispatchMessage(&msg);
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+
+            DesktopRect rect = getCaptureRect();
+            _lastRect = rect;
+            CaptureAnImageGDI();
+
+            auto elapsed = std::chrono::high_resolution_clock::now() - start;
+            auto remaining = frame_interval - std::chrono::duration_cast<std::chrono::milliseconds>(elapsed);
+            if (remaining.count() > 0) {
+                std::this_thread::sleep_for(remaining);
             }
             break;
+        }
         default:
-            //std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             break;
         }
     }
@@ -188,12 +167,8 @@ int DWMCapture::CaptureAnImageGDI()
     GetWindowInfo(hWnd, &info);
     UINT dpi = GetDpiForWindow(hWnd);
     UINT dpis = GetDpiForSystem();
-    //UINT dpin = Snapshot::DPI::GuessSystemDpi(hWnd);
 
     auto nrec = rectdwm.MulDiv(dpi, dpis);
-
-    //logger::logInfoW(L"hwnd/monitor/system: %d/%d/%d", dpi, dpis, dpis);
-    //logger::logInfoW(L"f/s: %dx%d / %dx%d", rectdwm.Width(), rectdwm.Height(), nrec.Width(), nrec.Height());
 
     if (cdc && hdc) {
         if (Platform::IsWindows8Point1OrGreater()) {
@@ -217,10 +192,6 @@ int DWMCapture::CaptureAnImageGDI()
                             == TRUE;
 
                         _onCaptured((uint8_t*)pbmpl2, fr);
-                        /*Snapshot::Utils::save_bmp((uint8_t *)pbmpl2, exportSz.cx, exportSz.cy, 4,
-                                                  exportSz.cx, exportSz.cy, path);*/
-                        /*Snapshot::Utils::save_png_mem((uint8_t *)pbmpl2, exportSz.cx, exportSz.cy, 4, exportSz.cx,
-                                                      exportSz.cy, dest.data, dest.data_len);*/
                         SelectObject(ccdc, cchobj);
                         DeleteObject(cchdib);
                         DeleteDC(ccdc);

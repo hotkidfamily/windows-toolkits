@@ -11,6 +11,7 @@ DXGICapture::DXGICapture()
 
 DXGICapture::~DXGICapture()
 {
+    stop();
     _deinit();
 }
 
@@ -38,11 +39,9 @@ bool DXGICapture::_init(HMONITOR &hm)
 {
     bool bRet = false;
     HRESULT hr = E_FAIL;
-    const char *info = nullptr;
 
     do {
         if (!fnD3D11CreateDevice) {
-            info = "Load D3D11";
             break;
         }
 
@@ -114,30 +113,22 @@ bool DXGICapture::_init(HMONITOR &hm)
     } while (0);
 
     bRet = SUCCEEDED(hr);
-    if (!bRet) {
-    
-    }
 
     return bRet;
 }
 
 void DXGICapture::_deinit()
 {
-
 }
 
-bool DXGICapture::onCaptured(DXGI_MAPPED_RECT &rect, DXGI_OUTPUT_DESC &header)
+bool DXGICapture::_onCaptured(DXGI_MAPPED_RECT &rect, DXGI_OUTPUT_DESC &header)
 {
-    bool bRet = false;
-    int x = abs(_lastRect.left());
-    int y = abs(_lastRect.top());
     int width = _lastRect.width();
     int height = _lastRect.height();
     int stride = width * 4;
     auto inStride = rect.Pitch;
 
     uint8_t *pBits = (uint8_t *)rect.pBits;
-    DesktopRect capRect = DesktopRect::MakeRECT(_outputDesc.DesktopCoordinates);
 
     int bpp = CapUtility::kDesktopCaptureBPP;
     if (!_frames.get() || width != static_cast<UINT>(_frames->width()) || height != static_cast<UINT>(_frames->height())
@@ -156,39 +147,38 @@ bool DXGICapture::onCaptured(DXGI_MAPPED_RECT &rect, DXGI_OUTPUT_DESC &header)
         }
     }
 
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
+    invokeCallback(_frames.get());
 
-        if (_callback) {
-            _callback(_frames.get(), _callbackargs);
-        }
-    }
-
-    return bRet;
+    return true;
 }
 
 bool DXGICapture::startCaptureWindow(HWND hWnd)
 {
-    bool bRet = false;
-    return bRet;
+    return false;
 }
 
 bool DXGICapture::startCaptureScreen(HMONITOR hMonitor)
 {
-    bool bRet = false;
+    if (!_init(hMonitor))
+        return false;
 
-    bRet = _init(hMonitor);
-
-    return bRet;
+    startLoop();
+    return true;
 }
 
 bool DXGICapture::stop()
 {
-    bool bRet = true;
-    return bRet;
+    stopLoop();
+    return true;
 }
 
-bool DXGICapture::captureImage(const DesktopRect &rect)
+void DXGICapture::onCaptureLoop()
+{
+    DesktopRect rect = getCaptureRect();
+    _captureImage(rect);
+}
+
+bool DXGICapture::_captureImage(const DesktopRect &rect)
 {
     bool bRet = false;
 
@@ -214,7 +204,6 @@ bool DXGICapture::captureImage(const DesktopRect &rect)
     hAcquiredDesktopImage->GetDesc(&fDesc);
     if (memcmp(&_sourceFormat, &fDesc, sizeof(D3D11_TEXTURE2D_DESC)) != 0) {
         _sourceFormat = fDesc;
-        ComPtr<ID3D11Texture2D> hNewDesktopImage2 = NULL;
         fDesc.Usage = D3D11_USAGE_STAGING;
         fDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         fDesc.BindFlags = 0;
@@ -228,55 +217,9 @@ bool DXGICapture::captureImage(const DesktopRect &rect)
             return FALSE;
         }
     }
-#if 0 // draw cursor info
-    hAcquiredDesktopImage->GetDesc(&fDesc);
-    ComPtr<ID3D11Texture2D> hNewDesktopImage = NULL;
-    fDesc.Usage = D3D11_USAGE_DEFAULT;
-    fDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    fDesc.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
-    fDesc.MipLevels = 1;
-    fDesc.ArraySize = 1;
-    fDesc.SampleDesc.Count = 1;
-    fDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    hr = _device->CreateTexture2D(&fDesc, NULL, &hNewDesktopImage);
-    if (FAILED(hr)) {
-        _desktopDuplication->ReleaseFrame();
-        return FALSE;
-    }
 
-    _deviceContext->CopyResource(hNewDesktopImage.Get(), hAcquiredDesktopImage.Get());
-    _desktopDuplication->ReleaseFrame();
-
-    {
-        ComPtr<IDXGISurface1> hStagingSurf = NULL;
-        hr = hNewDesktopImage->QueryInterface(__uuidof(IDXGISurface1), &hStagingSurf);
-        if (SUCCEEDED(hr)) {
-            CURSORINFO lCursorInfo = { 0 };
-
-            lCursorInfo.cbSize = sizeof(lCursorInfo);
-            auto lBoolres = GetCursorInfo(&lCursorInfo);
-
-            if (lBoolres == TRUE) {
-                if (lCursorInfo.flags == CURSOR_SHOWING) {
-                    auto lCursorPosition = lCursorInfo.ptScreenPos;
-                    auto lCursorSize = lCursorInfo.cbSize;
-
-                    HDC lHDC;
-                    HRESULT tHr = hStagingSurf->GetDC(FALSE, &lHDC);
-                    if (SUCCEEDED(tHr))
-                        DrawIconEx(lHDC, lCursorPosition.x, lCursorPosition.y, lCursorInfo.hCursor, 0, 0, 0, 0,
-                                   DI_NORMAL | DI_DEFAULTSIZE);
-                    hStagingSurf->ReleaseDC(nullptr);
-                }
-            }
-        }
-    }
-
-    _deviceContext->CopyResource(_destFrame.Get(), hNewDesktopImage.Get());
-#else
     _ctx->CopyResource(_destFrame.Get(), hAcquiredDesktopImage.Get());
     _desktopDuplication->ReleaseFrame();
-#endif
 
     ComPtr<IDXGISurface1> hStagingSurf = NULL;
     hr = _destFrame.As(&hStagingSurf);
@@ -287,7 +230,7 @@ bool DXGICapture::captureImage(const DesktopRect &rect)
     DXGI_MAPPED_RECT mappedRect;
     hr = hStagingSurf->Map(&mappedRect, DXGI_MAP_READ);
     if (SUCCEEDED(hr)) {
-        onCaptured(mappedRect, _outputDesc);
+        _onCaptured(mappedRect, _outputDesc);
         hStagingSurf->Unmap();
     }
 
@@ -296,32 +239,7 @@ bool DXGICapture::captureImage(const DesktopRect &rect)
     return bRet;
 }
 
-bool DXGICapture::setCallback(funcCaptureCallback fcb, void *args)
-{
-    bool bRet = true;
-
-    std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-    _callback = fcb;
-    _callbackargs = args;
-
-    return bRet;
-}
-
-bool DXGICapture::setExcludeWindows(std::vector<HWND>& hWnd)
-{
-    bool bRet = true;
-
-    _coverdWindows = std::move(hWnd);
-
-    return bRet;
-}
-
 const char *DXGICapture::getName()
 {
     return "DXGI Capture";
-}
-
-bool DXGICapture::usingTimer()
-{
-    return false;
 }

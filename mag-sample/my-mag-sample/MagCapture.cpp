@@ -44,7 +44,6 @@ bool MagCapture::_loadMagnificationAPI()
 
     _hMagModule = LoadLibraryW(L"magnification.dll");
 
-
     if (_hMagModule) {
         _api.reset(new MagInterface());
 
@@ -87,9 +86,6 @@ bool MagCapture::_initMagnifier(DesktopRect &rect)
 
     do 
     {
-        /*
-         * It will not work when DWM disabled.
-         */
         if (Platform::IsWindows7OrGreater()) {
             DwmIsCompositionEnabled(&result);
         }
@@ -112,8 +108,6 @@ bool MagCapture::_initMagnifier(DesktopRect &rect)
             break;
         }
 
-        // Register the host window class. See the MSDN documentation of the
-        // Magnification API for more information.
         WNDCLASSEXW wcex = {};
         wcex.cbSize = sizeof(WNDCLASSEX);
         wcex.lpfnWndProc = &DefWindowProc;
@@ -122,13 +116,11 @@ bool MagCapture::_initMagnifier(DesktopRect &rect)
         wcex.lpszClassName = kMagnifierHostClass;
         wcex.style = CS_VREDRAW | CS_HREDRAW | CS_DBLCLKS;
 
-        // Ignore the error which may happen when the class is already registered.
         RegisterClassExW(&wcex);
 
-        // Create the host window.
         _hostWnd = CreateWindowExW(WS_EX_TOPMOST |WS_EX_LAYERED, kMagnifierHostClass, kHostWindowName,
-                                   WS_CLIPCHILDREN | WS_POPUP | WS_EX_TRANSPARENT | // Click-through
-                                       WS_EX_TOOLWINDOW,                            // Do not show program on taskbar,
+                                   WS_CLIPCHILDREN | WS_POPUP | WS_EX_TRANSPARENT |
+                                       WS_EX_TOOLWINDOW,
                                    0, 0, rect.width(), rect.height(), nullptr, nullptr, hInstance,
                                    nullptr);
         if (!_hostWnd) {
@@ -138,7 +130,6 @@ bool MagCapture::_initMagnifier(DesktopRect &rect)
 
         SetLayeredWindowAttributes(_hostWnd, 0, 255, LWA_ALPHA);
 
-        // Create the magnifier control.
         _magWnd = CreateWindowExW(0, kMagnifierWindowClass, kMagnifierWindowName, WS_CHILD | MS_SHOWMAGNIFIEDCURSOR, 0,
                                   0, rect.width(), rect.height(), _hostWnd, nullptr, hInstance, nullptr);
         if (!_magWnd) {
@@ -146,10 +137,8 @@ bool MagCapture::_initMagnifier(DesktopRect &rect)
             break;
         }
 
-        // Hide the host window.
         ShowWindow(_hostWnd, SW_HIDE);
 
-        // Set the scaling callback to receive captured image.
         result = _api->SetImageScalingCallback(_magWnd, &MagCapture::_OnMagImageScalingCallback);
         if (!result) {
             info = "Set Image Scaling Callback.";
@@ -201,16 +190,11 @@ bool MagCapture::onCaptured(void *srcdata, MAGIMAGEHEADER header)
         return false;
     }
 
-    /*
-     * on multiple screen platform, offset maybe changed and may cause crash, so disable one.
-     */
     if (_offset != -1 && header.offset != _offset) {
         return false;
     }
 
-    //logger::log(LogLevel::Info, " %dx%d,%d, %d, %d\n", header.width, header.height, header.offset, header.stride, header.cbSize);
-
-    int bpp = header.cbSize / header.width / header.height; // bpp should be 4
+    int bpp = header.cbSize / header.width / header.height;
     if (!_frames.get() || header.format != GUID_WICPixelFormat32bppRGBA 
         || width != _frames->width() || height != _frames->height()
         || stride != _frames->stride() || bpp != CapUtility::kDesktopCaptureBPP) {
@@ -229,13 +213,7 @@ bool MagCapture::onCaptured(void *srcdata, MAGIMAGEHEADER header)
         }
     }
 
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-
-        if (_callback) {
-            _callback(_frames.get(), _callbackargs);
-        }
-    }
+    invokeCallback(_frames.get());
 
     _offset = header.offset;
 
@@ -261,18 +239,7 @@ BOOL WINAPI MagCapture::_OnMagImageScalingCallback(HWND hwnd,
 }
 
 
-bool MagCapture::setCallback(funcCaptureCallback fcb, void* args)
-{
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-        _callback = fcb;
-        _callbackargs = args;
-    }
-    return true;
-}
-
-
-bool MagCapture::captureImage(const DesktopRect& capRect) 
+bool MagCapture::_captureImage(const DesktopRect& capRect) 
 {
     bool bRet = false;
     DesktopRect rect = capRect;
@@ -284,8 +251,6 @@ bool MagCapture::captureImage(const DesktopRect& capRect)
             _lastRect = rect;
             TlsSetValue(GetTlsIndex(), this);
 
-            // OnCaptured will be called via OnMagImageScalingCallback and fill in the
-            // frame before set_window_source_func_ returns.
             bRet = _api->SetWindowSource(_magWnd, wRect) == TRUE;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -299,60 +264,108 @@ bool MagCapture::captureImage(const DesktopRect& capRect)
 
 bool MagCapture::setExcludeWindows(std::vector<HWND>& hWnd)
 {
-    bool ret = false;
-
-    ret = _api->SetWindowFilterList(_magWnd, MW_FILTERMODE_EXCLUDE, hWnd.size(), hWnd.data()) == TRUE;
-
-    return ret;
+    return _api->SetWindowFilterList(_magWnd, MW_FILTERMODE_EXCLUDE, hWnd.size(), hWnd.data()) == TRUE;
 }
 
+void MagCapture::_captureLoop()
+{
+    // Init magnifier on this thread — Mag API requires window creation
+    // and MagSetWindowSource to be on the same thread with a message pump.
+    {
+        bool result = _initMagnifier(_initRect);
+        std::lock_guard<std::mutex> lk(_initMutex);
+        _initResult = result;
+        _initDone = true;
+        _initCV.notify_one();
+        if (!result) {
+            return;
+        }
+    }
+
+    MSG msg{};
+    PeekMessage(&msg, NULL, 0, 0, PM_NOREMOVE);
+    _msgThreadID = GetCurrentThreadId();
+
+    UINT_PTR timerID = SetTimer(nullptr, 0, 1000 / _fps, nullptr);
+
+    while (_running) {
+        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT)
+                break;
+            if (msg.message == WM_TIMER) {
+                DesktopRect rect = getCaptureRect();
+                _captureImage(rect);
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        } else {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 1000 / _fps, QS_ALLINPUT);
+        }
+    }
+
+    KillTimer(nullptr, timerID);
+    _destoryMagnifier();
+}
+
+bool MagCapture::_startCapture(DesktopRect initRect)
+{
+    _initRect = initRect;
+    _initDone = false;
+    _initResult = false;
+    _running = true;
+    _msgThread = std::thread(&MagCapture::_captureLoop, this);
+
+    // Wait for the thread to finish initialization
+    {
+        std::unique_lock<std::mutex> lk(_initMutex);
+        _initCV.wait(lk, [this] { return _initDone; });
+    }
+
+    if (!_initResult) {
+        // Init failed, join the thread
+        if (_msgThread.joinable())
+            _msgThread.join();
+        _running = false;
+    }
+
+    return _initResult;
+}
 
 bool MagCapture::startCaptureWindow(HWND hWnd)
 {
-    bool ret = false;
-
     HMONITOR hm = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
     CapUtility::DisplaySetting settings = CapUtility::enumDisplaySettingByMonitor(hm);
     DesktopRect rect = DesktopRect::MakeRECT(settings.rect());
 
-    RECT primeryRect;
-    CapUtility::GetPrimeryWindowsRect(primeryRect);
-
-    ret = _initMagnifier(rect);
-
-    return ret;
+    return _startCapture(rect);
 }
 
 
 bool MagCapture::startCaptureScreen(HMONITOR hMonitor)
 {
-    bool ret = false;
     CapUtility::DisplaySetting settings = CapUtility::enumDisplaySettingByMonitor(hMonitor);
     DesktopRect rect = DesktopRect::MakeRECT(settings.rect());
 
-    RECT primeryRect;
-    CapUtility::GetPrimeryWindowsRect(primeryRect);
-
-    ret = _initMagnifier(rect);
-
-    return ret;
+    return _startCapture(rect);
 }
 
 bool MagCapture::stop()
 {
-    bool ret = false;
+    _running = false;
 
-    _destoryMagnifier();
+    if (_msgThreadID) {
+        PostThreadMessage(_msgThreadID, WM_QUIT, 0, 0);
+    }
 
-    return ret;
+    if (_msgThread.joinable()) {
+        _msgThread.join();
+    }
+    _msgThreadID = 0;
+
+    return true;
 }
 
 const char *MagCapture::getName()
 {
     return "MAG capture";
-}
-
-bool MagCapture::usingTimer()
-{
-    return true;
 }

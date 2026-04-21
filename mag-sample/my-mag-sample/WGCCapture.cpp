@@ -63,8 +63,6 @@ bool WGCCapture::_createSession()
     auto revoker = framePool.FrameArrived(winrt::auto_revoke, { this, &WGCCapture::_onFrameArrived });
 
     if (Platform::IsWin10_2004OrGreater()) {
-        //if (Windows.Foundation.Metadata.ApiInformation.IsApiContractPresent(
-        // "Windows.Foundation.UniversalApiContract", 10)) // 2004
         if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
                 L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsCursorCaptureEnabled")) {
             session.IsCursorCaptureEnabled(false);
@@ -72,16 +70,12 @@ bool WGCCapture::_createSession()
     }
 
     if (Platform::IsWin10_21H1OrGreater())
-    // if (Windows.Foundation.Metadata.ApiInformation.IsApiContractPresent(
-    // "Windows.Foundation.UniversalApiContract", 12)) // 2104
     if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
             L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired")){
         session.IsBorderRequired(false);
     }
 
     if (Platform::IsWin11_24H2OrGreater()) {
-        // if (Windows.Foundation.Metadata.ApiInformation.IsApiContractPresent(
-        // "Windows.Foundation.UniversalApiContract", 19)) // 2104
         if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
                 L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IncludeSecondaryWindows")) {
             session.IncludeSecondaryWindows(true);
@@ -161,37 +155,18 @@ bool WGCCapture::stop()
     return true;
 }
 
-bool WGCCapture::captureImage(const DesktopRect &rect)
-{
-    _lastRect = rect;
-    return true;
-}
-
-bool WGCCapture::setCallback(funcCaptureCallback fcb, void *args)
-{
-    std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-    _callback = fcb;
-    _callbackargs = args;
-
-    return false;
-}
-
-bool WGCCapture::setExcludeWindows(std::vector<HWND> &hWnd)
-{
-    return false;
-}
-
 bool WGCCapture::_onCaptured(D3D11_MAPPED_SUBRESOURCE &rect, D3D11_TEXTURE2D_DESC &header)
 {
     bool bRet = false;
-    int x = abs(_lastRect.left());
-    int y = abs(_lastRect.top());
-    int width = _lastRect.width();
-    int height = _lastRect.height();
+    DesktopRect captureRect = getCaptureRect();
+    int x = abs(captureRect.left());
+    int y = abs(captureRect.top());
+    int width = captureRect.width();
+    int height = captureRect.height();
     int stride = width * 4;
     auto inStride = rect.RowPitch;
 
-    if (_lastRect.is_empty()) {
+    if (captureRect.is_empty()) {
         width = header.Width;
         height = header.Height;
         stride = width * 4;
@@ -217,13 +192,7 @@ bool WGCCapture::_onCaptured(D3D11_MAPPED_SUBRESOURCE &rect, D3D11_TEXTURE2D_DES
         }
     }
 
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-
-        if (_callback) {
-            _callback(_frames.get(), _callbackargs);
-        }
-    }
+    invokeCallback(_frames.get());
 
     return bRet;
 }
@@ -248,14 +217,6 @@ void WGCCapture::_onFrameArrived(winrt::Windows::Graphics::Capture::Direct3D11Ca
     _d3d11device->GetImmediateContext(ctx.put());
     D3D11_TEXTURE2D_DESC desc;
     texture->GetDesc(&desc);
-
-    // desc.Usage = D3D11_USAGE_STAGING;
-    // desc.BindFlags = 0;
-    // desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    // desc.MiscFlags = 0;
-
-    // winrt::com_ptr<ID3D11Texture2D> userTexture = nullptr;
-    // winrt::check_hresult(_dev->CreateTexture2D(&desc, NULL, userTexture.put()));
 
     if (!_tempTexture) {
         winrt::check_hresult(CPGPU::MakeTex(_d3d11device.get(), desc.Width, desc.Height, desc.Format,

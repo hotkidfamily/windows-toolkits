@@ -1,4 +1,4 @@
-
+﻿
 // my-mag-sample.cpp : Defines the class behaviors for the application.
 //
 

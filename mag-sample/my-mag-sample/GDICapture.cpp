@@ -10,13 +10,11 @@ GDICapture::GDICapture()
 
 GDICapture::~GDICapture()
 {
-
+    stop();
 }
 
 bool GDICapture::startCaptureWindow(HWND hWnd)
 {
-    bool bRet = false;
-
     _hwnd = { hWnd };
     _hmonitor = { nullptr };
 
@@ -35,17 +33,18 @@ bool GDICapture::startCaptureWindow(HWND hWnd)
     _monitorDC = CreateDCW(L"myDisplay", mInfo.szDevice, NULL, NULL);
     _compatibleDC = ::CreateCompatibleDC(_monitorDC);
 
-    bRet = _monitorDC && _compatibleDC;
-    if (!bRet)
+    bool bRet = _monitorDC && _compatibleDC;
+    if (!bRet) {
         logger::logInfo("monitor DC %x, compatible DC %x, bRet %d", _monitorDC, _compatibleDC, bRet);
+        return false;
+    }
 
-    return bRet;
+    startLoop();
+    return true;
 }
 
 bool GDICapture::startCaptureScreen(HMONITOR hMonitor)
 {
-    bool bRet = false;
-
     _hwnd = { nullptr };
     _hmonitor = { hMonitor };
 
@@ -58,16 +57,19 @@ bool GDICapture::startCaptureScreen(HMONITOR hMonitor)
     _monitorDC = CreateDCW(L"myDisplay", mInfo.szDevice, NULL, NULL);
     _compatibleDC = ::CreateCompatibleDC(_monitorDC);
 
-    bRet = _monitorDC && _compatibleDC;
-    if (!bRet)
+    bool bRet = _monitorDC && _compatibleDC;
+    if (!bRet) {
         logger::logInfo("monitor DC %x, compatible DC %x, bRet %d", _monitorDC, _compatibleDC, bRet);
+        return false;
+    }
 
-    return bRet;
+    startLoop();
+    return true;
 }
 
 bool GDICapture::stop()
 {
-    bool bRet = false;
+    stopLoop();
 
     if (_compatibleDC)
         ::DeleteDC(_compatibleDC);
@@ -82,9 +84,16 @@ bool GDICapture::stop()
     _monitorDC = nullptr;
     _hDibBitmap = nullptr;
 
-    SetForegroundWindow(_previousHwnd);
+    if (_previousHwnd)
+        SetForegroundWindow(_previousHwnd);
 
-    return bRet;
+    return true;
+}
+
+void GDICapture::onCaptureLoop()
+{
+    DesktopRect rect = getCaptureRect();
+    _captureImage(rect);
 }
 
 static int ComputePitch(_In_ int nWidth, _In_ int nBPP)
@@ -92,11 +101,8 @@ static int ComputePitch(_In_ int nWidth, _In_ int nBPP)
     return ((((nWidth * nBPP) + 31) / 32) * 4);
 }
 
-bool GDICapture::onCaptured(void *srcdata, BITMAPINFOHEADER &header)
+bool GDICapture::_onCaptured(void *srcdata, BITMAPINFOHEADER &header)
 {
-    bool bRet = false;
-    int x = abs(_lastRect.left());
-    int y = abs(_lastRect.top());
     int width = _lastRect.width();
     int height = _lastRect.height();
     int stride = ComputePitch(width, 32);
@@ -113,7 +119,7 @@ bool GDICapture::onCaptured(void *srcdata, BITMAPINFOHEADER &header)
 
     {
         uint8_t *pDst = reinterpret_cast<uint8_t *>(_frames->data());
-        uint8_t *pSrc = reinterpret_cast<uint8_t *>(pBits);//+y *inStride + x *bpp;
+        uint8_t *pSrc = reinterpret_cast<uint8_t *>(pBits);
 
         for (int i = 0; i < height; i++) {
             memcpy(pDst, pSrc, stride);
@@ -121,8 +127,12 @@ bool GDICapture::onCaptured(void *srcdata, BITMAPINFOHEADER &header)
             pSrc += inStride;
         }
         {
-            std::vector<DesktopRect> maskRects;
-            for (auto &h : _coverdWindows) {
+            std::vector<HWND> coveredWnds;
+            {
+                std::lock_guard<decltype(_excludeMutex)> guard(_excludeMutex);
+                coveredWnds = _coverdWindows;
+            }
+            for (auto &h : coveredWnds) {
                 CRect rect;
                 CapUtility::GetWindowRectAccuracy(h, rect);
 
@@ -155,18 +165,12 @@ bool GDICapture::onCaptured(void *srcdata, BITMAPINFOHEADER &header)
         }
     }
 
-    {
-        std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
+    invokeCallback(_frames.get());
 
-        if (_callback) {
-            _callback(_frames.get(), _callbackargs);
-        }
-    }
-
-    return bRet;
+    return true;
 }
 
-bool GDICapture::captureImage(const DesktopRect &reqRect)
+bool GDICapture::_captureImage(const DesktopRect &reqRect)
 {
     bool bRet = false;
     BITMAPINFOHEADER &bmh = bmi.bmiHeader;
@@ -193,6 +197,9 @@ bool GDICapture::captureImage(const DesktopRect &reqRect)
         bmh.biBitCount = USHORT(nBitPerPixel);
         bmh.biCompression = BI_RGB;
 
+        if (_hDibBitmap)
+            ::DeleteObject(_hDibBitmap);
+
         _hDibBitmap = ::CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &_hdstPtr, NULL, 0);
         if (_hDibBitmap == NULL) {
             return (FALSE);
@@ -206,48 +213,29 @@ bool GDICapture::captureImage(const DesktopRect &reqRect)
     int nBytes;
     nBytes = ::GetObject(_hDibBitmap, sizeof(DIBSECTION), &dibsection);
 
-    bRet = StretchBlt(_compatibleDC,               // 保存到的目标 图片对象 上下文
-           0, 0,    // 起始 x, y 坐标
-           rect.width(), rect.height(), // 截图宽高
-           _monitorDC,     // 截取对象的 上下文句柄
-           rect.left(), rect.top(),     // 指定源矩形区域左上角的 X, y 逻辑坐标
-           rect.width(), rect.height(), // 截图宽高
+    bRet = StretchBlt(_compatibleDC,
+           0, 0,
+           rect.width(), rect.height(),
+           _monitorDC,
+           rect.left(), rect.top(),
+           rect.width(), rect.height(),
            SRCCOPY) == TRUE;
 
     _hDibBitmap = HBITMAP(::SelectObject(_compatibleDC, hOldBitmap));
 
-    onCaptured(_hdstPtr, bmh);
-
-
-    return bRet;
-}
-
-bool GDICapture::setCallback(funcCaptureCallback fcb, void *args)
-{
-    bool bRet = false;
-
-    std::lock_guard<decltype(_cbMutex)> guard(_cbMutex);
-    _callback = fcb;
-    _callbackargs = args;
+    _onCaptured(_hdstPtr, bmh);
 
     return bRet;
 }
 
 bool GDICapture::setExcludeWindows(std::vector<HWND>& hWnd)
 {
-    bool bRet = false;
-
+    std::lock_guard<decltype(_excludeMutex)> guard(_excludeMutex);
     _coverdWindows = std::move(hWnd);
-
-    return bRet;
+    return true;
 }
 
 const char* GDICapture::getName()
 {
     return "GDI capture";
-}
-
-bool GDICapture::usingTimer()
-{
-    return true;
 }

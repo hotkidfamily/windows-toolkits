@@ -5,6 +5,8 @@
 #include "capturer-define.h"
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <atomic>
 #include "VideoFrame.h"
 
 
@@ -17,12 +19,8 @@ class DWMCapture : public CCapture {
     bool startCaptureWindow(HWND hWnd) final;
     bool startCaptureScreen(HMONITOR hMonitor) final;
     bool stop() final;
-    bool captureImage(const DesktopRect &rect) final;
-    bool setCallback(funcCaptureCallback, void *) final;
-    bool setExcludeWindows(std::vector<HWND>& hWnd) final;
     
     const char *getName() final { return "DWMCapture";}
-    bool usingTimer() final { return false; }
 
     int CaptureAnImageGDI();
 
@@ -34,7 +32,7 @@ class DWMCapture : public CCapture {
 
   private:
     std::thread _thread;
-    bool _exit = true;
+    std::atomic<bool> _exit{ true };
 
     HWND _hostWnd{};
 
@@ -42,14 +40,8 @@ class DWMCapture : public CCapture {
     HMONITOR _hmonitor = nullptr;
     HTHUMBNAIL _thumbnail = nullptr;
 
-
     std::unique_ptr<VideoFrame> _frames;
     DesktopRect _lastRect = {};
-
-    std::recursive_mutex _cbMutex;
-    funcCaptureCallback _callback = nullptr;
-    void *_callbackargs = nullptr;
-
 
     enum class ACTION
     {
@@ -57,4 +49,5 @@ class DWMCapture : public CCapture {
     };
 
     ACTION _action = ACTION::ACTION_Idle;
+    uint32_t _fps = 30;
 };

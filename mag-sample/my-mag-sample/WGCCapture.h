@@ -27,13 +27,8 @@ class WGCCapture : public CCapture {
     bool startCaptureWindow(HWND hWnd) final;
     bool startCaptureScreen(HMONITOR hMonitor) final;
     bool stop() final;
-    bool captureImage(const DesktopRect &rect) final;
-    bool setCallback(funcCaptureCallback, void *) final;
-    bool setExcludeWindows(std::vector<HWND>& hWnd) final;
     
     const char *getName() final { return "Windows.Graphics.Capture";}
-    bool usingTimer() final { return false; }
-
 
   private:
     void _onFrameArrived(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const &sender,
@@ -64,9 +59,4 @@ class WGCCapture : public CCapture {
     HMONITOR _hmonitor = nullptr;
 
     std::unique_ptr<VideoFrame> _frames;
-    DesktopRect _lastRect = {};
-
-    std::recursive_mutex _cbMutex;
-    funcCaptureCallback _callback = nullptr;
-    void *_callbackargs = nullptr;
 };

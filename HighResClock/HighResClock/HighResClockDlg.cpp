@@ -69,6 +69,7 @@ ON_WM_QUERYDRAGICON()
 ON_WM_CLOSE()
 ON_WM_LBUTTONDBLCLK()
 ON_WM_SIZE()
+ON_MESSAGE(WM_DPICHANGED, &CHighResClockDlg::OnDpiChanged)
 END_MESSAGE_MAP()
 
 // CHighResClockDlg 消息处理程序
@@ -202,4 +203,25 @@ void CHighResClockDlg::OnSize(UINT, int x, int y)
         SIZE v = { x, y };
         _render->Resize(v);
     }
+}
+
+LRESULT CHighResClockDlg::OnDpiChanged(WPARAM wParam, LPARAM lParam)
+{
+    UINT newDpi = HIWORD(wParam);
+    RECT* pRect = reinterpret_cast<RECT*>(lParam);
+
+    if (pRect)
+    {
+        SetWindowPos(nullptr, pRect->left, pRect->top,
+                     pRect->right - pRect->left,
+                     pRect->bottom - pRect->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    if (_render)
+    {
+        _render->UpdateDpi(newDpi);
+    }
+
+    return 0;
 }

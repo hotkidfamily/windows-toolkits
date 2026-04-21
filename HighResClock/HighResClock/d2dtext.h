@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #define NOMINMAX
 
@@ -6,6 +6,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 
+#include <string>
 #include <thread>
 
 class d2dtext {
@@ -23,6 +24,7 @@ class d2dtext {
     bool Config(bool);
 
     bool Resize(SIZE);
+    bool UpdateDpi(UINT dpi);
 
     bool Start();
     bool End();
@@ -33,6 +35,12 @@ class d2dtext {
                         Microsoft::WRL::ComPtr<IDWriteTextFormat> &format,
                         float &fontHeight,
                         int fontSize);
+    int _fitFontSize(IDWriteFactory *factory,
+                     float maxWidth,
+                     float maxHeight,
+                     const std::wstring &refText,
+                     int minFs,
+                     int maxFs);
 
   private:
     std::thread _thread;
@@ -42,4 +50,6 @@ class d2dtext {
     HWND _hwnd;
     SIZE _initSz{};
     SIZE _UpdateSz{};
+    UINT _dpi = 96;
+    UINT _pendingDpi = 0;
 };

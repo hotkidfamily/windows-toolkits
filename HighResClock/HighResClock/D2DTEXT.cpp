@@ -22,6 +22,18 @@ bool d2dtext::Init(HWND hwnd)
     _initSz = { r.Width(), r.Height() };
     _UpdateSz = _initSz;
 
+    // Get initial DPI for the monitor this window is on
+    UINT dpi = 96;
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32)
+    {
+        typedef UINT(WINAPI * PFN_GetDpiForWindow)(HWND);
+        auto pfn = (PFN_GetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (pfn)
+            dpi = pfn(_hwnd);
+    }
+    _dpi = dpi;
+
     return true;
 }
 
@@ -36,6 +48,12 @@ bool d2dtext::Resize(SIZE v)
 {
     _UpdateSz = v;
     return false;
+}
+
+bool d2dtext::UpdateDpi(UINT dpi)
+{
+    _pendingDpi = dpi;
+    return true;
 }
 
 bool d2dtext::Start()
@@ -72,6 +90,10 @@ bool d2dtext::_run()
     float clockFontHeight = NAN;
     std::unique_ptr<utils::DurationSlidingWindow> _statics = std::make_unique<utils::DurationSlidingWindow>(2000);
 
+    // Reference text for measuring text width (worst-case width)
+    std::wstring clockRefText = L"00:00:00.000";
+    std::wstring dbgRefText = L"f/l/h:0000.00/000~000";
+
     do
     {
         hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), &_factory);
@@ -107,8 +129,8 @@ bool d2dtext::_run()
             break;
         }
 
-        hr = _createFont(_writerFactory.Get(), _clockFormat, clockFontHeight, 72);
-        hr = _createFont(_writerFactory.Get(), _dbgFormat, dbgFontHeight, 28);
+        hr = _createFont(_writerFactory.Get(), _clockFormat, clockFontHeight, MulDiv(72, _dpi, 96));
+        hr = _createFont(_writerFactory.Get(), _dbgFormat, dbgFontHeight, MulDiv(28, _dpi, 96));
 
     } while (0);
 
@@ -119,7 +141,7 @@ bool d2dtext::_run()
 
         int count = 0;
         auto start = std::chrono::high_resolution_clock::now();
-        float scale = 1.0f;
+        bool fontDirty = true;
 
         while (!_stop)
         {
@@ -128,25 +150,40 @@ bool d2dtext::_run()
                 Sleep(100);
                 continue;
             }
+
+            // Handle DPI change
+            if (_pendingDpi != 0 && _pendingDpi != _dpi)
+            {
+                _dpi = _pendingDpi;
+                _pendingDpi = 0;
+                fontDirty = true;
+            }
+
             if (_UpdateSz.cx != 0 && _UpdateSz.cy != 0)
             {
-                D2D1_SIZE_U rsz = { _UpdateSz.cx, _UpdateSz.cy };
+                D2D1_SIZE_U rsz = { (UINT32)_UpdateSz.cx, (UINT32)_UpdateSz.cy };
                 _target->Resize(rsz);
-
-                float scalex = _UpdateSz.cx * 1.0f / _initSz.cx;
-                float scaley = _UpdateSz.cy * 1.0f / _initSz.cy;
-                float nscale = (std::max)(scalex, scaley);
-
-                if (abs(nscale - scale) > 0.2f)
-                {
-                    int fs = 72 * nscale;
-                    hr = _createFont(_writerFactory.Get(), _clockFormat, clockFontHeight, fs);
-                    scale = nscale;
-                }
-
                 _UpdateSz = { 0, 0 };
+                fontDirty = true;
             }
+
+            // Use render target's DIP size for font fitting (consistent with DrawTextW layout)
             D2D1_SIZE_F rtSize = _target->GetSize();
+
+            if (fontDirty)
+            {
+                float availW = rtSize.width * 0.95f;   // 留 5% 边距
+                float clockH = rtSize.height * 0.85f;   // 时钟占 85% 高度
+                float dbgH = rtSize.height * 0.15f;     // 调试信息占 15% 高度
+
+                int clockFs = _fitFontSize(_writerFactory.Get(), availW, clockH, clockRefText, 8, 800);
+                int dbgFs = _fitFontSize(_writerFactory.Get(), availW, dbgH, dbgRefText, 8, 400);
+
+                hr = _createFont(_writerFactory.Get(), _clockFormat, clockFontHeight, clockFs);
+                hr = _createFont(_writerFactory.Get(), _dbgFormat, dbgFontHeight, dbgFs);
+                fontDirty = false;
+            }
+
             auto top = (rtSize.height - clockFontHeight) / 2;
             if (top < 0)
                 top = 0;
@@ -179,7 +216,7 @@ bool d2dtext::_run()
             auto clockMsg = wss.str();
 
             _target->DrawTextW(clockMsg.c_str(),   // Text to render
-                               clockMsg.size(),    // Text length
+                               (UINT32)clockMsg.size(),    // Text length
                                _clockFormat.Get(), // Text format
                                clockRect,          // The region of the window where the text will be rendered
                                _clockBrush.Get(),  // The brush used to draw the text
@@ -203,7 +240,7 @@ bool d2dtext::_run()
                 }
                 auto dbgMsg = dbgWss.str();
                 _target->DrawTextW(dbgMsg.c_str(),   // Text to render
-                                   dbgMsg.size(),    // Text length
+                                   (UINT32)dbgMsg.size(),    // Text length
                                    _dbgFormat.Get(), // Text format
                                    dbgRect,          // The region of the window where the text will be rendered
                                    _dbgBrush.Get(),  // The brush used to draw the text
@@ -233,7 +270,7 @@ HRESULT d2dtext::_createFont(IDWriteFactory *factory,
     do
     {
         hr = factory->CreateTextFormat(L"Monaco", NULL, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
-                                       DWRITE_FONT_STRETCH_NORMAL, fontSize, L"en-us", &reqFormat);
+                                       DWRITE_FONT_STRETCH_NORMAL, (float)fontSize, L"en-us", &reqFormat);
         if (FAILED(hr))
         {
             break;
@@ -241,7 +278,7 @@ HRESULT d2dtext::_createFont(IDWriteFactory *factory,
 
         ComPtr<IDWriteTextLayout> pTextLayout = nullptr;
         std::wstring msg = L"1234567890:";
-        hr = factory->CreateTextLayout(msg.c_str(), msg.size(), reqFormat.Get(), 1000.0f, 1000.0f, &pTextLayout);
+        hr = factory->CreateTextLayout(msg.c_str(), (UINT32)msg.size(), reqFormat.Get(), 100000.0f, 100000.0f, &pTextLayout);
 
         if (SUCCEEDED(hr))
         {
@@ -261,4 +298,56 @@ HRESULT d2dtext::_createFont(IDWriteFactory *factory,
     }
 
     return hr;
+}
+
+int d2dtext::_fitFontSize(IDWriteFactory *factory,
+                          float maxWidth,
+                          float maxHeight,
+                          const std::wstring &refText,
+                          int minFs,
+                          int maxFs)
+{
+    // Binary search for the largest font size that fits within maxWidth x maxHeight on a single line
+    int bestFs = minFs;
+    while (minFs <= maxFs)
+    {
+        int mid = (minFs + maxFs) / 2;
+
+        ComPtr<IDWriteTextFormat> tmpFormat;
+        HRESULT hr = factory->CreateTextFormat(L"Monaco", NULL, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
+                                               DWRITE_FONT_STRETCH_NORMAL, (float)mid, L"en-us", &tmpFormat);
+        if (FAILED(hr))
+        {
+            maxFs = mid - 1;
+            continue;
+        }
+
+        ComPtr<IDWriteTextLayout> tmpLayout;
+        hr = factory->CreateTextLayout(refText.c_str(), (UINT32)refText.size(), tmpFormat.Get(),
+                                       100000.0f, 100000.0f, &tmpLayout);
+        if (FAILED(hr))
+        {
+            maxFs = mid - 1;
+            continue;
+        }
+
+        DWRITE_TEXT_METRICS metrics;
+        hr = tmpLayout->GetMetrics(&metrics);
+        if (FAILED(hr))
+        {
+            maxFs = mid - 1;
+            continue;
+        }
+
+        if (metrics.width <= maxWidth && metrics.height <= maxHeight)
+        {
+            bestFs = mid;
+            minFs = mid + 1;
+        }
+        else
+        {
+            maxFs = mid - 1;
+        }
+    }
+    return bestFs;
 }

@@ -159,7 +159,6 @@ int DWMCapture::CaptureAnImageGDI()
     HDC hdc = ::GetDC(hWnd);
     HDC cdc = CreateCompatibleDC(hdc);
 
-    CSize exportSz{ _lastRect.width(), _lastRect.height() };
     CRect rectdwm;
     auto dwmret = DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rectdwm, sizeof(RECT)) == S_OK;
     WINDOWINFO info{};
@@ -169,6 +168,11 @@ int DWMCapture::CaptureAnImageGDI()
     UINT dpis = GetDpiForSystem();
 
     auto nrec = rectdwm.MulDiv(dpi, dpis);
+
+    CSize exportSz{ _lastRect.width(), _lastRect.height() };
+    if (exportSz.cx <= 0 || exportSz.cy <= 0) {
+        exportSz = { nrec.Width(), nrec.Height() };
+    }
 
     if (cdc && hdc) {
         UINT pwFlag = Platform::IsWindows8Point1OrGreater() ? PW_RENDERFULLCONTENT : 0;

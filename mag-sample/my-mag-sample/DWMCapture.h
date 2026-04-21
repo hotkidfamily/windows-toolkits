@@ -29,6 +29,7 @@ class DWMCapture : public CCapture {
     void _run();
     bool _createSession();
     bool _stopSession();
+    void _updateThumbnailSize();
 
   private:
     std::thread _thread;
@@ -39,6 +40,7 @@ class DWMCapture : public CCapture {
     HWND _hwnd = nullptr;
     HMONITOR _hmonitor = nullptr;
     HTHUMBNAIL _thumbnail = nullptr;
+    SIZE _lastThumbSize{};
 
     std::unique_ptr<VideoFrame> _frames;
     DesktopRect _lastRect = {};

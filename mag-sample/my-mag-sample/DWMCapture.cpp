@@ -119,6 +119,8 @@ void DWMCapture::_run()
         {
             auto start = std::chrono::high_resolution_clock::now();
 
+            _updateThumbnailSize();
+
             DesktopRect rect = getCaptureRect();
             _lastRect = rect;
             CaptureAnImageGDI();
@@ -248,11 +250,36 @@ bool DWMCapture::_createSession()
             hr = DwmUpdateThumbnailProperties(thumbnail, &dskThumbProps);
             if (SUCCEEDED(hr)) {
                 _thumbnail = thumbnail;
+                _lastThumbSize = size;
             }
         }
     }
 
     return _hostWnd != nullptr;
+}
+
+void DWMCapture::_updateThumbnailSize()
+{
+    if (!_thumbnail)
+        return;
+
+    SIZE size;
+    HRESULT hr = DwmQueryThumbnailSourceSize(_thumbnail, &size);
+    if (FAILED(hr))
+        return;
+
+    if (size.cx == _lastThumbSize.cx && size.cy == _lastThumbSize.cy)
+        return;
+
+    _lastThumbSize = size;
+
+    SetWindowPos(_hostWnd, nullptr, 0, 0, size.cx, size.cy,
+                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+
+    DWM_THUMBNAIL_PROPERTIES dskThumbProps;
+    dskThumbProps.dwFlags = DWM_TNP_RECTDESTINATION;
+    dskThumbProps.rcDestination = { 0, 0, size.cx, size.cy };
+    DwmUpdateThumbnailProperties(_thumbnail, &dskThumbProps);
 }
 
 bool DWMCapture::_stopSession()

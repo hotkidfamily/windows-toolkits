@@ -171,35 +171,33 @@ int DWMCapture::CaptureAnImageGDI()
     auto nrec = rectdwm.MulDiv(dpi, dpis);
 
     if (cdc && hdc) {
-        if (Platform::IsWindows8Point1OrGreater()) {
-            void *pbmpl1{ nullptr };
-            auto hb = _create32bitRGBDIB(nrec.Width(), -nrec.Height(), pbmpl1);
-            if (hb) {
-                auto hoj = SelectObject(cdc, hb);
-                if (::PrintWindow(hWnd, cdc, PW_RENDERFULLCONTENT) == TRUE) {
-                    HDC ccdc = CreateCompatibleDC(cdc);
-                    void *pbmpl2{ nullptr };
-                    auto cchdib = _create32bitRGBDIB(exportSz.cx, -exportSz.cy, pbmpl2);
-                    if (ccdc && cchdib) {
-                        // setp 2
-                        auto cchobj = SelectObject(ccdc, cchdib);
-                        CRect fr{ 0, 0, exportSz.cx, exportSz.cy };
-                        FillRect(ccdc, fr, (HBRUSH)GetStockObject(WHITE_BRUSH));
-                        SetStretchBltMode(ccdc, HALFTONE);
-                        auto loffset = info.cxWindowBorders;
-                        auto bRet = StretchBlt(ccdc, 0, 0, exportSz.cx, exportSz.cy, cdc, loffset, 0,
-                                               nrec.Width() - loffset, nrec.Height(), SRCCOPY)
-                            == TRUE;
+        UINT pwFlag = Platform::IsWindows8Point1OrGreater() ? PW_RENDERFULLCONTENT : 0;
+        void *pbmpl1{ nullptr };
+        auto hb = _create32bitRGBDIB(nrec.Width(), -nrec.Height(), pbmpl1);
+        if (hb) {
+            auto hoj = SelectObject(cdc, hb);
+            if (::PrintWindow(hWnd, cdc, pwFlag) == TRUE) {
+                HDC ccdc = CreateCompatibleDC(cdc);
+                void *pbmpl2{ nullptr };
+                auto cchdib = _create32bitRGBDIB(exportSz.cx, -exportSz.cy, pbmpl2);
+                if (ccdc && cchdib) {
+                    auto cchobj = SelectObject(ccdc, cchdib);
+                    CRect fr{ 0, 0, exportSz.cx, exportSz.cy };
+                    FillRect(ccdc, fr, (HBRUSH)GetStockObject(WHITE_BRUSH));
+                    SetStretchBltMode(ccdc, HALFTONE);
+                    auto loffset = info.cxWindowBorders;
+                    auto bRet = StretchBlt(ccdc, 0, 0, exportSz.cx, exportSz.cy, cdc, loffset, 0,
+                                           nrec.Width() - loffset, nrec.Height(), SRCCOPY)
+                        == TRUE;
 
-                        _onCaptured((uint8_t*)pbmpl2, fr);
-                        SelectObject(ccdc, cchobj);
-                        DeleteObject(cchdib);
-                        DeleteDC(ccdc);
-                    }
+                    _onCaptured((uint8_t*)pbmpl2, fr);
+                    SelectObject(ccdc, cchobj);
+                    DeleteObject(cchdib);
+                    DeleteDC(ccdc);
                 }
-                SelectObject(cdc, hoj);
-                DeleteObject(hb);
             }
+            SelectObject(cdc, hoj);
+            DeleteObject(hb);
         }
     }
 

@@ -298,7 +298,7 @@ std::unique_ptr<CCapture> CmymagsampleDlg::_createCaptureBackend(bool isScreenCa
     else {
         if (Platform::IsWin10_1903OrGreater() && sysIdx < 2)
             return std::make_unique<WGCCapture>();
-        if (Platform::IsWindows8Point1OrGreater() && sysIdx < 4)
+        if (Platform::IsWindows7OrGreater() && sysIdx < 7)
             return std::make_unique<DWMCapture>();
         if (Platform::IsWindowsVistaOrGreater() && sysIdx < 8)
             return std::make_unique<MagCapture>();
